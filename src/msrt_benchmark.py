@@ -149,21 +149,40 @@ def preprocess_input_file(input_file):
 
 
 def load_gpu_results(gpu_file):
-    """Load GPU clustering results"""
+    """
+    Load GPU clustering results
+    
+    Returns:
+        tuple: (filtered_dataframe, total_scans_in_file)
+            - filtered_dataframe: DataFrame with cluster == -1 filtered out (for purity calculation)
+            - total_scans_in_file: Total number of scans including unclustered (for N10 calculation)
+    
+    Note: scan == -1 indicates unclustered spectra (noise), which are filtered out
+    for purity calculation but should be included in total scans for N10 calculation.
+    """
     print(f"Loading GPU results from {gpu_file}...")
     df = pd.read_csv(gpu_file, sep='\t')
     
+    # Save total scans before filtering (includes unclustered spectra with cluster == -1)
+    total_scans_in_file = len(df)
+    
     # GPU identifier format: 000011026_RA3_01_6002 (this is the base filename)
-    # scan is -1, so we need to create a virtual scan ID based on precursor_mz and RT
-    # For purity calculation, we'll use identifier as filename and create a scan-like ID
+    # scan column is read directly from the file (may be -1)
+    # For purity calculation, we'll use identifier as filename
     df['base_filename'] = df['identifier'].astype(str)
     df['filename'] = df['identifier'].astype(str) + '.mzML'  # Add .mzML for consistency
     
-    # Create a virtual scan ID: use a hash or index based on precursor_mz and RT
-    # For simplicity, we'll use the row index as scan (but this won't match CPU)
-    # Actually, for purity calculation, we just need unique identifiers
-    # We'll use identifier + a counter for each unique (identifier, precursor_mz, rt) combination
-    df['scan'] = df.groupby(['identifier', 'precursor_mz', 'retention_time']).ngroup()
+    # Use scan column directly from file
+    # If scan is -1 for all rows, we need to create unique scan IDs for each spectrum
+    # Each row represents a unique spectrum, so we use row index as scan ID if scan is -1
+    if 'scan' not in df.columns:
+        # If scan column doesn't exist, create it based on row index
+        df['scan'] = df.index
+    elif (df['scan'] == -1).all():
+        # If all scans are -1, create unique scan IDs based on row index
+        # This ensures each spectrum has a unique identifier
+        df['scan'] = df.index
+    # Otherwise, use scan column as-is
     
     # Create spectrum identifier: identifier_precursor_mz_retention_time
     # This should be unique for each spectrum
@@ -173,13 +192,16 @@ def load_gpu_results(gpu_file):
         df['retention_time'].astype(str)
     )
     
-    # Filter out noise (cluster == -1)
-    df = df[df['cluster'] != -1].copy()
+    # Filter out noise (cluster == -1) for purity calculation
+    # These unclustered spectra are excluded from clustering metrics but should be
+    # included in total scans for N10 calculation
+    df_filtered = df[df['cluster'] != -1].copy()
     
-    print(f"Loaded {len(df)} GPU scan assignments")
-    print(f"GPU clusters: {df['cluster'].nunique()}")
+    print(f"Loaded {len(df_filtered)} GPU scan assignments (clustered)")
+    print(f"Total scans in file (including unclustered): {total_scans_in_file:,}")
+    print(f"GPU clusters: {df_filtered['cluster'].nunique()}")
     
-    return df
+    return df_filtered, total_scans_in_file
 
 
 def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor_mz_window=0.01):
@@ -504,12 +526,16 @@ Examples:
     tsv_file = preprocess_input_file(args.input)
     
     # Load results
-    gpu_df = load_gpu_results(tsv_file)
+    # Returns filtered dataframe (for purity) and total scans (for N10, including unclustered)
+    gpu_df, total_scans_in_file = load_gpu_results(tsv_file)
     
-    # Determine total scans
+    # Determine total scans for N10 calculation
+    # Note: total scans should include unclustered spectra (cluster == -1)
+    # which are filtered out for purity calculation but needed for N10
     if args.total_scans is None:
-        total_scans = len(gpu_df)
-        print(f"\nUsing total scans from input file: {total_scans:,}")
+        # Use total scans from file (includes unclustered spectra)
+        total_scans = total_scans_in_file
+        print(f"\nUsing total scans from input file (including unclustered): {total_scans:,}")
     else:
         total_scans = args.total_scans
         print(f"\nUsing specified total scans: {total_scans:,}")
