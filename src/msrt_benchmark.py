@@ -16,6 +16,9 @@ from functools import partial
 from tqdm import tqdm
 import gc
 import argparse
+import subprocess
+from pathlib import Path
+import re
 
 # Method dictionary for falcon format
 method_dic = {
@@ -26,6 +29,123 @@ method_dic = {
         'rt_time': 'retention_time'
     }
 }
+
+
+def extract_dataset_name(file_path):
+    """Extract dataset name from file path"""
+    # Try to extract MSV number or dataset identifier
+    path_str = str(file_path)
+    
+    # Look for MSV number pattern
+    msv_match = re.search(r'MSV\d+', path_str)
+    if msv_match:
+        return msv_match.group(0)
+    
+    # Look for other patterns
+    # Extract from filename like "MSV000081981_clustering_results_1k.csv.parquet"
+    filename = Path(file_path).stem  # Remove .parquet
+    filename = Path(filename).stem    # Remove .csv if present
+    
+    # Extract dataset prefix
+    match = re.match(r'([^_]+)', filename)
+    if match:
+        return match.group(1)
+    
+    # Fallback: use parent directory name or generic name
+    parent = Path(file_path).parent.name
+    if parent:
+        return parent
+    
+    return "dataset"
+
+
+def convert_parquet_to_tsv(input_file):
+    """
+    Convert parquet file to TSV format using convert_to_tsv.py
+    
+    Args:
+        input_file: Path to parquet file
+        
+    Returns:
+        Path to converted TSV file
+    """
+    input_path = Path(input_file)
+    
+    # Auto-generate output filename
+    dataset_name = extract_dataset_name(input_path)
+    output_dir = input_path.parent
+    output_path = output_dir / f"{dataset_name}_clusterinfo_gpu.tsv"
+    
+    # Check if converted file already exists
+    if output_path.exists():
+        print(f"Converted TSV file already exists: {output_path}")
+        print("Using existing file. Delete it if you want to regenerate.")
+        return str(output_path)
+    
+    print(f"Detected parquet file: {input_path}")
+    print(f"Converting to TSV format...")
+    
+    # Get the directory of this script
+    script_dir = Path(__file__).parent
+    convert_script = script_dir / "convert_to_tsv.py"
+    
+    if not convert_script.exists():
+        # Fallback: try direct conversion using pandas
+        print("convert_to_tsv.py not found, using direct pandas conversion...")
+        try:
+            df = pd.read_parquet(input_path)
+            df.to_csv(output_path, sep='\t', index=False)
+            print(f"✓ Conversion completed: {output_path}")
+            return str(output_path)
+        except Exception as e:
+            print(f"Error: Failed to convert parquet file: {e}", file=sys.stderr)
+            print("Please install pyarrow: pip install pyarrow", file=sys.stderr)
+            sys.exit(1)
+    
+    # Use convert_to_tsv.py script
+    try:
+        result = subprocess.run(
+            [sys.executable, str(convert_script), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return str(output_path)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Failed to convert parquet file: {e}", file=sys.stderr)
+        if e.stdout:
+            print(e.stdout, file=sys.stderr)
+        if e.stderr:
+            print(e.stderr, file=sys.stderr)
+        sys.exit(1)
+
+
+def preprocess_input_file(input_file):
+    """
+    Preprocess input file: convert parquet to TSV if needed
+    
+    Args:
+        input_file: Path to input file (TSV or parquet)
+        
+    Returns:
+        Path to TSV file (converted if needed, original if already TSV)
+    """
+    input_path = Path(input_file)
+    
+    # Check if file is parquet format
+    if input_path.suffix == '.parquet' or input_path.name.endswith('.csv.parquet'):
+        print(f"\n{'='*80}")
+        print("PREPROCESSING: Converting parquet to TSV format")
+        print(f"{'='*80}")
+        tsv_file = convert_parquet_to_tsv(input_file)
+        print(f"{'='*80}\n")
+        return tsv_file
+    
+    # Already TSV, return as is
+    return input_file
 
 
 def load_gpu_results(gpu_file):
@@ -361,7 +481,7 @@ Examples:
     )
     
     parser.add_argument('--input', type=str, required=True,
-                       help='Path to GPU cluster info TSV file')
+                       help='Path to GPU cluster info TSV file or parquet file (.parquet or .csv.parquet will be automatically converted)')
     parser.add_argument('--rt_window', type=float, default=30.0,
                        help='Retention time window in seconds (default: 30.0)')
     parser.add_argument('--precursor_mz_window', type=float, default=0.01,
@@ -380,8 +500,11 @@ Examples:
         print(f"Error: Input file not found: {args.input}")
         sys.exit(1)
     
+    # Preprocess input file: convert parquet to TSV if needed
+    tsv_file = preprocess_input_file(args.input)
+    
     # Load results
-    gpu_df = load_gpu_results(args.input)
+    gpu_df = load_gpu_results(tsv_file)
     
     # Determine total scans
     if args.total_scans is None:
@@ -417,6 +540,8 @@ Examples:
         f.write("MS-RT Benchmark Results\n")
         f.write("=" * 80 + "\n\n")
         f.write(f"Input File: {args.input}\n")
+        if tsv_file != args.input:
+            f.write(f"Converted TSV File: {tsv_file}\n")
         f.write(f"RT Window: {args.rt_window} seconds\n")
         f.write(f"Precursor m/z Window: {args.precursor_mz_window} Da\n")
         f.write(f"Batch Size: {args.batch_size}\n")
