@@ -173,16 +173,7 @@ def load_gpu_results(gpu_file):
     df['filename'] = df['identifier'].astype(str) + '.mzML'  # Add .mzML for consistency
     
     # Use scan column directly from file
-    # If scan is -1 for all rows, we need to create unique scan IDs for each spectrum
-    # Each row represents a unique spectrum, so we use row index as scan ID if scan is -1
-    if 'scan' not in df.columns:
-        # If scan column doesn't exist, create it based on row index
-        df['scan'] = df.index
-    elif (df['scan'] == -1).all():
-        # If all scans are -1, create unique scan IDs based on row index
-        # This ensures each spectrum has a unique identifier
-        df['scan'] = df.index
-    # Otherwise, use scan column as-is
+    # scan column is read as-is from the TSV file
     
     # Create spectrum identifier: identifier_precursor_mz_retention_time
     # This should be unique for each spectrum
