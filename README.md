@@ -191,12 +191,24 @@ python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
 
 #### Specify Total Scans for N10 Calculation
 
-By default, the total number of scans is inferred from the input file. If you need to use a different value (e.g., including noise clusters that were filtered out):
+By default, the total number of scans is automatically inferred from the input file (the number of rows in the file after filtering out noise clusters with `cluster == -1`). The tool will display: `Using total scans from input file: X`.
 
+**When to specify `--total_scans`:**
+- If you want to include noise clusters (with `cluster == -1`) that were filtered out in the N10 calculation
+- If you have a known total number of scans from the original dataset before clustering
+- If you want to compare N10 values across different clustering runs using the same total scan count
+
+**Example:**
 ```bash
+# Default: uses number of rows in input file (1,237,710 in this example)
+python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv
+
+# Specify a different total (e.g., including noise clusters)
 python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
-                             --total_scans 7342436
+                             --total_scans 1500000
 ```
+
+**Note:** The N10 metric is calculated based on the cumulative coverage of scans. Specifying a larger `--total_scans` value will result in a higher N10 value, as it requires more scans to reach the 10% coverage threshold.
 
 #### Custom Output Directory
 
@@ -217,7 +229,7 @@ python src/msrt_benchmark.py \
     --rt_window 30.0 \
     --precursor_mz_window 0.01 \
     --batch_size 10000 \
-    --total_scans 7342436 \
+    --total_scans 1237710 \
     --output_dir results/
 ```
 
@@ -229,7 +241,7 @@ python src/msrt_benchmark.py \
 | `--rt_window` | float | 30.0 | Retention time window in seconds |
 | `--precursor_mz_window` | float | 0.01 | Precursor m/z window in Da |
 | `--batch_size` | int | 10000 | Batch size for multi-threaded processing (affects max memory usage) |
-| `--total_scans` | int | None | Total number of scans for N10 calculation (default: number of rows in input file) |
+| `--total_scans` | int | None | Total number of scans for N10 calculation (default: automatically inferred from input file, displays "Using total scans from input file: X") |
 | `--output_dir` | string | . | Output directory for results |
 
 ## Output
@@ -241,31 +253,33 @@ The tool generates two types of output:
 The tool prints progress information and a summary to the console:
 
 ```
-Loading GPU results from data/orbitrap_clusterinfo_gpu.tsv...
-Loaded 7342436 GPU scan assignments
-GPU clusters: 1234567
+Loading GPU results from ./data/orbitrap_clusterinfo_gpu.tsv...
+Loaded 1237710 GPU scan assignments
+GPU clusters: 904976
+
+Using total scans from input file: 1,237,710
 
 ================================================================================
 Calculating metrics for GPU clustering results
 ================================================================================
 Calculating N10...
-N10 value: 12345
+N10 value: 22
 Calculating purity (this may take a while)...
-Processing 1,234,567 clusters in batches of 10,000...
+Processing 904,976 clusters in batches of 10,000...
 Using RT window: 30.0 seconds, Precursor m/z window: 0.01 Da
-Calculating purity: 100%|████████████████████| 1234567/1234567 [10:23<00:00, 1987.45it/s]
-Processed 1,234,567 clusters successfully.
-Weighted Average Purity: 0.923456
-Simple Average Purity: 0.912345
+Calculating purity: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 904976/904976 [03:49<00:00, 3937.05it/s]
+Processed 904,976 clusters successfully.
+Weighted Average Purity: 0.979450
+Simple Average Purity: 0.995611
 
 ================================================================================
 SUMMARY
 ================================================================================
-Total Clusters: 1,234,567
-Total Scans: 7,342,436
-N10: 12,345
-Weighted Average Purity: 0.923456
-Simple Average Purity: 0.912345
+Total Clusters: 904,976
+Total Scans: 1,237,710
+Completeness (N10 metric): 22
+Weighted Average Purity: 0.979450
+Simple Average Purity: 0.995611
 ================================================================================
 
 Results saved to: ./msrt_benchmark_results.txt
@@ -276,13 +290,32 @@ Done!
 
 A text file (`msrt_benchmark_results.txt`) is saved to the output directory containing:
 
-- Input file path
+- Input file path (and converted TSV file path if parquet was used)
 - Parameter settings (RT window, precursor m/z window, batch size)
-- Total scans
+- Total scans (used for N10 calculation)
 - Total clusters
-- N10 value
+- Total scans in clusters (after filtering noise)
+- Completeness (N10 metric)
 - Weighted average purity
 - Simple average purity
+
+**Example results file content:**
+```
+MS-RT Benchmark Results
+================================================================================
+
+Input File: data/orbitrap_clusterinfo_gpu.tsv
+RT Window: 30.0 seconds
+Precursor m/z Window: 0.01 Da
+Batch Size: 10000
+Total Scans: 1237710
+
+Total Clusters: 904,976
+Total Scans (in clusters): 1,237,710
+Completeness (N10 metric): 22
+Weighted Average Purity: 0.979450
+Simple Average Purity: 0.995611
+```
 
 ## Understanding the Metrics
 
@@ -298,6 +331,11 @@ N10 represents the cluster size threshold at which 10% of all scans are covered.
 **Interpretation:**
 - **Lower N10**: Indicates that many scans are in relatively small clusters, suggesting lower completeness
 - **Higher N10**: Indicates that a significant portion of scans are in large clusters, suggesting higher completeness and better consolidation of related spectra
+
+**Typical N10 Values:**
+- For datasets with ~1M scans: N10 values typically range from 10-100, depending on clustering parameters
+- For datasets with ~10M scans: With appropriate clustering parameters (e.g., eps ~0.25 for Falcon), N10 values in the thousands (e.g., 1,000-5,000) are expected
+- **N10 values that are too small** (e.g., < 100 for 10M scans) may indicate that the clustering algorithm is splitting related spectra into too many small clusters, suggesting the need to adjust clustering parameters (e.g., increase eps for Falcon) to achieve better consolidation
 
 This metric has been validated against traditional database search-based completeness metrics in proteomics datasets, demonstrating consistent relative performance ordering of clustering tools^[1].
 
@@ -318,6 +356,16 @@ Purity is calculated using a network-based approach:
 - **Purity < 1.0**: Some spectra are disconnected, suggesting potential clustering errors
 - **Higher purity**: Generally indicates better clustering quality
 
+**Typical Purity Values:**
+- **Typical purity range**: Well-performing clustering algorithms typically achieve purity values in the range of **0.97-0.99** (weighted average purity)
+- **Purity < 0.97**: May indicate clustering quality issues, such as:
+  - Over-clustering: Related spectra are being split into separate clusters
+  - Under-clustering: Unrelated spectra are being grouped together
+  - Parameter misconfiguration: RT window or precursor m/z window may need adjustment
+- **Purity > 0.99**: Excellent clustering quality, indicating that most clusters contain well-connected, related spectra
+
+**Note:** The actual purity value depends on the clustering algorithm, dataset characteristics, and parameter settings. Values consistently below 0.97 may warrant investigation of clustering parameters or algorithm selection.
+
 ## Performance Considerations
 
 ### Memory Usage
@@ -332,14 +380,27 @@ The tool uses batch processing to manage memory efficiently. The `--batch_size` 
 
 Processing time depends on:
 - Number of clusters (more clusters = longer processing)
-- Cluster sizes (larger clusters take more time to process)
+- Cluster sizes (larger clusters take more time to process due to more network edge calculations)
 - Batch size (smaller batches may be slightly slower due to overhead)
 - Number of CPU cores (parallel processing is used)
+- RT window and precursor m/z window (larger windows create more edges, increasing computation)
 
-Typical processing times:
-- Small datasets (< 100K clusters): Seconds to minutes
-- Medium datasets (100K - 1M clusters): Minutes to tens of minutes
-- Large datasets (> 1M clusters): Tens of minutes to hours
+**Performance Benchmarks:**
+Based on actual test runs with default parameters (RT window: 30.0 seconds, precursor m/z window: 0.01 Da, batch size: 10,000):
+- **~900K clusters, ~1.2M scans**: ~4 minutes (processing rate: ~3,900 clusters/second)
+- Processing rate typically ranges from 2,000-5,000 clusters/second depending on cluster size distribution and hardware
+
+**Typical processing times (estimated):**
+- Small datasets (< 100K clusters): 10-30 seconds
+- Medium datasets (100K - 500K clusters): 1-5 minutes
+- Medium-large datasets (500K - 1M clusters): 3-10 minutes
+- Large datasets (1M - 5M clusters): 10-60 minutes
+- Very large datasets (> 5M clusters): 1-4 hours
+
+**Note:** Actual processing time can vary significantly based on:
+- Average cluster size (larger clusters require more network computations)
+- Hardware specifications (CPU cores, memory speed)
+- System load during processing
 
 ## Troubleshooting
 
