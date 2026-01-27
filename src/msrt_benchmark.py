@@ -71,10 +71,15 @@ def convert_parquet_to_tsv(input_file):
     """
     input_path = Path(input_file)
     
-    # Auto-generate output filename
-    dataset_name = extract_dataset_name(input_path)
+    # Auto-generate output filename using input file prefix + .tsv
+    # e.g., orbitrap_clustering_results_1k.csv.parquet -> orbitrap_clustering_results_1k.csv.tsv
     output_dir = input_path.parent
-    output_path = output_dir / f"{dataset_name}_clusterinfo_gpu.tsv"
+    # Remove .parquet or .csv.parquet extension and add .tsv
+    stem = input_path.stem  # Gets filename without extension
+    if stem.endswith('.csv'):
+        # Handle .csv.parquet case
+        stem = stem[:-4]  # Remove .csv
+    output_path = output_dir / f"{stem}.tsv"
     
     # Check if converted file already exists
     if output_path.exists():
