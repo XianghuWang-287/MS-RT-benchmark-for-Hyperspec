@@ -179,6 +179,10 @@ def load_gpu_results(gpu_file):
     
     # Use scan column directly from file
     # scan column is read as-is from the TSV file
+    # If all scans are -1, assign sequential numbers starting from 1
+    if 'scan' in df.columns and (df['scan'] == -1).all():
+        print("All scan values are -1, assigning sequential scan numbers starting from 1...")
+        df['scan'] = range(1, len(df) + 1)
     
     # Create spectrum identifier: identifier_precursor_mz_retention_time
     # This should be unique for each spectrum
@@ -222,8 +226,10 @@ def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor
     G.add_nodes_from(node_attrs.items())
 
     # Precompute mass and rt_time for efficient access
+    # Store filename and scan separately to avoid parsing issues with underscores in filenames
     specs = cluster.apply(lambda row: (
-        f"{row[method_dic[method]['filename']]}_{row[method_dic[method]['scan']]}",
+        f"{row[method_dic[method]['filename']]}_{row[method_dic[method]['scan']]}",  # node_name for graph
+        row[method_dic[method]['filename']],  # filename for comparison (separate to avoid parsing)
         row[method_dic[method]['mass']],
         row[method_dic[method]['rt_time']]
     ), axis=1).tolist()
@@ -231,11 +237,21 @@ def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor
     # Create edges based on conditions
     # RT tolerance: configurable (default: 30 seconds)
     # Precursor m/z tolerance: configurable (default: 0.01 Da)
+    # Add a global/procedural variable to control tqdm/progress bar usage
+    # By default, progress bar is off, unless set elsewhere by the user
+    USE_PROGRESS_BAR = globals().get("USE_PROGRESS_BAR", False)
+
+    if USE_PROGRESS_BAR:
+        from tqdm import tqdm as _tqdm
+        comb_iter = _tqdm(list(combinations(specs, 2)), desc="Building cluster network")
+    else:
+        comb_iter = combinations(specs, 2)
+
     edges = [
-        (spec1[0], spec2[0]) for spec1, spec2 in combinations(specs, 2)
-        if spec1[0].split('_')[0] == spec2[0].split('_')[0]  # Ensure filenames are the same
-           and abs(spec1[1] - spec2[1]) <= precursor_mz_window 
-           and abs(spec1[2] - spec2[2]) <= rt_window
+        (spec1[0], spec2[0]) for spec1, spec2 in comb_iter
+        if spec1[1] == spec2[1]
+           and abs(spec1[2] - spec2[2]) <= precursor_mz_window 
+           and abs(spec1[3] - spec2[3]) <= rt_window
     ]
     G.add_edges_from(edges)
 
