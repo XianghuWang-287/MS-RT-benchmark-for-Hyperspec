@@ -235,12 +235,23 @@ python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
 A complete example with all parameters specified:
 
 ```bash
+# Using seconds (default)
 python src/msrt_benchmark.py \
     --input data/orbitrap_clusterinfo_gpu.tsv \
     --rt_window 30.0 \
+    --rt_unit seconds \
     --precursor_mz_window 0.01 \
     --batch_size 10000 \
     --total_scans 1237710 \
+    --output_dir results/
+
+# Using minutes (data retention_time values will be interpreted as minutes)
+python src/msrt_benchmark.py \
+    --input data/orbitrap_clusterinfo_gpu.tsv \
+    --rt_unit minutes \
+    --rt_window 0.5 \
+    --precursor_mz_window 0.01 \
+    --batch_size 10000 \
     --output_dir results/
 ```
 
