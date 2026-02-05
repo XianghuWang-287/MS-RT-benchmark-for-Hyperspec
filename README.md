@@ -58,7 +58,7 @@ The input file (TSV or parquet) should contain the following columns:
 
 - `identifier`: Sample identifier (e.g., "000011026_RA3_01_6002")
 - `precursor_mz`: Precursor m/z value
-- `retention_time`: Retention time in seconds
+- `retention_time`: Retention time value (unit depends on `--rt_unit` parameter: seconds by default, or minutes if `--rt_unit minutes` is specified)
 - `cluster`: Cluster assignment (clusters with value -1 are treated as noise and excluded)
 
 Example input file structure:
@@ -103,7 +103,7 @@ python src/msrt_benchmark.py --input data/orbitrap_clustering_results_1k.csv.par
 ```
 
 This will use all default parameters:
-- RT window: 30.0 seconds
+- RT window: 30.0 seconds (or 0.5 minutes if `--rt_unit minutes` is specified)
 - Precursor m/z window: 0.01 Da
 - Batch size: 10000
 
@@ -156,11 +156,22 @@ The `convert_to_tsv.py` script can be useful for:
 Adjust the retention time window for matching spectra within clusters:
 
 ```bash
+# Using seconds (default)
 python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
                              --rt_window 30.0
+
+# Using minutes
+python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
+                             --rt_unit minutes --rt_window 0.5
 ```
 
-The RT window is specified in seconds. A larger window allows spectra with more distant retention times to be considered as matches, which may increase connectivity in the matching network but could also reduce purity scores.
+**RT Window Units:**
+- **Default**: RT window is specified in **seconds** (default: 30.0 seconds)
+- **Minutes support**: Use `--rt_unit minutes` to specify RT window in minutes (default: 0.5 minutes = 30.0 seconds)
+- **Important**: When `--rt_unit minutes` is specified, the `retention_time` values in your input data are also interpreted as **minutes** and automatically converted to seconds for internal calculations
+- All calculations internally use seconds for consistency
+
+A larger window allows spectra with more distant retention times to be considered as matches, which may increase connectivity in the matching network but could also reduce purity scores.
 
 #### Custom Precursor m/z Window
 
@@ -238,7 +249,8 @@ python src/msrt_benchmark.py \
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--input` | string | **Required** | Path to GPU cluster info TSV file or parquet file (.parquet or .csv.parquet will be automatically converted) |
-| `--rt_window` | float | 30.0 | Retention time window in seconds |
+| `--rt_window` | float | None | Retention time window value (default: 30.0 seconds or 0.5 minutes depending on `--rt_unit`) |
+| `--rt_unit` | string | seconds | Unit for retention time window: "seconds" or "minutes". When "minutes" is specified, data retention_time values are also interpreted as minutes |
 | `--precursor_mz_window` | float | 0.01 | Precursor m/z window in Da |
 | `--batch_size` | int | 10000 | Batch size for multi-threaded processing (affects max memory usage) |
 | `--total_scans` | int | None | Total number of scans for N10 calculation (default: automatically inferred from input file, displays "Using total scans from input file: X") |
