@@ -516,8 +516,11 @@ Examples:
     
     parser.add_argument('--input', type=str, required=True,
                        help='Path to GPU cluster info TSV file or parquet file (.parquet or .csv.parquet will be automatically converted)')
-    parser.add_argument('--rt_window', type=float, default=30.0,
-                       help='Retention time window in seconds (default: 30.0)')
+    parser.add_argument('--rt_window', type=float, default=None,
+                       help='Retention time window value; unit is controlled by --rt_unit '
+                            '(default: 30.0 seconds or 0.5 minutes)')
+    parser.add_argument('--rt_unit', type=str, choices=['seconds', 'minutes'], default='seconds',
+                       help='Unit for retention time window: "seconds" or "minutes" (default: seconds)')
     parser.add_argument('--precursor_mz_window', type=float, default=0.01,
                        help='Precursor m/z window in Da (default: 0.01)')
     parser.add_argument('--batch_size', type=int, default=10000,
@@ -552,11 +555,27 @@ Examples:
         total_scans = args.total_scans
         print(f"\nUsing specified total scans: {total_scans:,}")
     
+    # Determine RT window in seconds
+    # - If unit is seconds and no value is provided: default to 30.0 seconds
+    # - If unit is minutes and no value is provided: default to 0.5 minutes (30.0 seconds)
+    if args.rt_unit == 'minutes':
+        if args.rt_window is None:
+            rt_window_seconds = 0.5 * 60.0
+        else:
+            rt_window_seconds = args.rt_window * 60.0
+    else:
+        if args.rt_window is None:
+            rt_window_seconds = 30.0
+        else:
+            rt_window_seconds = args.rt_window
+
+    rt_window_minutes = rt_window_seconds / 60.0
+    
     # Calculate metrics
     metrics = calculate_metrics(
         gpu_df, 
         total_scans,
-        rt_window=args.rt_window,
+        rt_window=rt_window_seconds,
         precursor_mz_window=args.precursor_mz_window,
         batch_size=args.batch_size
     )
@@ -580,7 +599,7 @@ Examples:
         f.write(f"Input File: {args.input}\n")
         if tsv_file != args.input:
             f.write(f"Converted TSV File: {tsv_file}\n")
-        f.write(f"RT Window: {args.rt_window} seconds\n")
+        f.write(f"RT Window: {rt_window_seconds} seconds ({rt_window_minutes:.3f} minutes)\n")
         f.write(f"Precursor m/z Window: {args.precursor_mz_window} Da\n")
         f.write(f"Batch Size: {args.batch_size}\n")
         f.write(f"Total Scans: {total_scans:,}\n\n")
