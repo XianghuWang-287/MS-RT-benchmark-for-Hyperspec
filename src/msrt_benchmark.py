@@ -544,6 +544,12 @@ Examples:
     # Returns filtered dataframe (for purity) and total scans (for N10, including unclustered)
     gpu_df, total_scans_in_file = load_gpu_results(tsv_file)
     
+    # Convert retention_time in data if unit is minutes
+    # If rt_unit is minutes, data retention_time values are in minutes, convert to seconds
+    if args.rt_unit == 'minutes':
+        print(f"Converting retention_time from minutes to seconds (multiplying by 60)...")
+        gpu_df['retention_time'] = gpu_df['retention_time'] * 60.0
+    
     # Determine total scans for N10 calculation
     # Note: total scans should include unclustered spectra (cluster == -1)
     # which are filtered out for purity calculation but needed for N10
@@ -558,6 +564,7 @@ Examples:
     # Determine RT window in seconds
     # - If unit is seconds and no value is provided: default to 30.0 seconds
     # - If unit is minutes and no value is provided: default to 0.5 minutes (30.0 seconds)
+    # Note: After conversion, all retention_time values in data are in seconds
     if args.rt_unit == 'minutes':
         if args.rt_window is None:
             rt_window_seconds = 0.5 * 60.0
