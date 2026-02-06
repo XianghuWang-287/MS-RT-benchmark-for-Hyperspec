@@ -311,6 +311,8 @@ python src/msrt_benchmark.py \
 | `--precursor_mz_window` | float | 0.01 | Precursor m/z window in Da |
 | `--batch_size` | int | 10000 | Batch size for multi-threaded processing (affects max memory usage) |
 | `--total_scans` | int | None | Total number of scans for N10 calculation (default: automatically inferred from input file, displays "Using total scans from input file: X") |
+| `--ignore_identifier` | flag | False | Ignore identifier: treat all spectra in each cluster as from same file. **Warning**: Significantly slower (10-500x) for large clusters. Uses sliding window optimization to mitigate performance impact. |
+| `--extract_identifier` | flag | False | Extract filename and scan number from identifier column (e.g., "file.mzML:123" -> filename="file.mzML", scan=123). Original scan column will be ignored. |
 | `--output_dir` | string | . | Output directory for results |
 
 ## Output
