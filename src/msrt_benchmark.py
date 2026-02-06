@@ -153,9 +153,60 @@ def preprocess_input_file(input_file):
     return input_file
 
 
-def load_gpu_results(gpu_file):
+def extract_filename_and_scan_from_identifier(identifier):
+    """
+    Extract filename and scan number from identifier string.
+    
+    Handles formats like:
+    - "filename.mzML:scan_number" -> (filename.mzML, scan_number)
+    - "filename:scan_number" -> (filename, scan_number)
+    - "filename_scan_number" -> (filename, scan_number) if scan is numeric
+    
+    Args:
+        identifier: Identifier string that may contain filename and scan
+        
+    Returns:
+        tuple: (filename, scan_number) where scan_number is int or None
+    """
+    identifier_str = str(identifier)
+    
+    # Try format: "filename:scan" (most common)
+    if ':' in identifier_str:
+        parts = identifier_str.rsplit(':', 1)  # Split from right to handle filenames with colons
+        if len(parts) == 2:
+            filename = parts[0]
+            scan_str = parts[1]
+            try:
+                scan_number = int(scan_str)
+                return filename, scan_number
+            except ValueError:
+                # If scan part is not numeric, return as-is
+                return identifier_str, None
+    
+    # Try format: "filename_scan" where scan is numeric at the end
+    # This is a fallback, less reliable
+    parts = identifier_str.rsplit('_', 1)
+    if len(parts) == 2:
+        filename_part, scan_str = parts
+        try:
+            scan_number = int(scan_str)
+            # Only use this if scan looks reasonable (e.g., > 0)
+            if scan_number > 0:
+                return filename_part, scan_number
+        except ValueError:
+            pass
+    
+    # If no pattern matches, return identifier as filename and None for scan
+    return identifier_str, None
+
+
+def load_gpu_results(gpu_file, extract_identifier=False):
     """
     Load GPU clustering results
+    
+    Args:
+        gpu_file: Path to GPU results TSV file
+        extract_identifier: If True, extract filename and scan from identifier column
     
     Returns:
         tuple: (filtered_dataframe, total_scans_in_file)
@@ -171,18 +222,42 @@ def load_gpu_results(gpu_file):
     # Save total scans before filtering (includes unclustered spectra with cluster == -1)
     total_scans_in_file = len(df)
     
-    # GPU identifier format: 000011026_RA3_01_6002 (this is the base filename)
-    # scan column is read directly from the file (may be -1)
-    # For purity calculation, we'll use identifier as filename
-    df['base_filename'] = df['identifier'].astype(str)
-    df['filename'] = df['identifier'].astype(str) + '.mzML'  # Add .mzML for consistency
-    
-    # Use scan column directly from file
-    # scan column is read as-is from the TSV file
-    # If all scans are -1, assign sequential numbers starting from 1
-    if 'scan' in df.columns and (df['scan'] == -1).all():
-        print("All scan values are -1, assigning sequential scan numbers starting from 1...")
-        df['scan'] = range(1, len(df) + 1)
+    # Extract filename and scan from identifier if requested
+    if extract_identifier:
+        print("Extracting filename and scan number from identifier column...")
+        print("Note: Original scan column will be ignored, using extracted scan values only.")
+        extracted = df['identifier'].apply(extract_filename_and_scan_from_identifier)
+        df['extracted_filename'] = extracted.apply(lambda x: x[0])
+        df['extracted_scan'] = extracted.apply(lambda x: x[1])
+        
+        # Use extracted filename and scan (completely replace, ignore original scan column)
+        df['filename'] = df['extracted_filename']
+        df['scan'] = df['extracted_scan']
+        
+        # Check if any scans are None or invalid
+        if df['scan'].isna().any():
+            print(f"Warning: {df['scan'].isna().sum()} identifiers could not be parsed for scan number")
+            # Fill missing scans with sequential numbers starting from 1
+            missing_mask = df['scan'].isna()
+            start_idx = 1
+            df.loc[missing_mask, 'scan'] = range(start_idx, start_idx + missing_mask.sum())
+        
+        df['base_filename'] = df['filename']
+        print(f"Extracted filenames: {df['filename'].nunique()} unique files")
+        print(f"Scan numbers range: {df['scan'].min()} to {df['scan'].max()}")
+    else:
+        # GPU identifier format: 000011026_RA3_01_6002 (this is the base filename)
+        # scan column is read directly from the file (may be -1)
+        # For purity calculation, we'll use identifier as filename
+        df['base_filename'] = df['identifier'].astype(str)
+        df['filename'] = df['identifier'].astype(str) + '.mzML'  # Add .mzML for consistency
+        
+        # Use scan column directly from file
+        # scan column is read as-is from the TSV file
+        # If all scans are -1, assign sequential numbers starting from 1
+        if 'scan' in df.columns and (df['scan'] == -1).all():
+            print("All scan values are -1, assigning sequential scan numbers starting from 1...")
+            df['scan'] = range(1, len(df) + 1)
     
     # Create spectrum identifier: identifier_precursor_mz_retention_time
     # This should be unique for each spectrum
@@ -204,7 +279,7 @@ def load_gpu_results(gpu_file):
     return df_filtered, total_scans_in_file
 
 
-def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor_mz_window=0.01):
+def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor_mz_window=0.01, ignore_identifier=False):
     """
     Create matching network for a cluster (optimized version)
     
@@ -213,46 +288,129 @@ def optimized_create_matching_network(cluster, method, rt_window=30.0, precursor
         method: Method name (e.g., 'falcon')
         rt_window: Retention time window in seconds (default: 30.0)
         precursor_mz_window: Precursor m/z window in Da (default: 0.01)
+        ignore_identifier: If True, treat all spectra in cluster as from same file (default: False)
     """
     G = nx.Graph()
 
     # Precompute the node names and add them to the graph
-    node_attrs = {
-        f"{row[method_dic[method]['filename']]}_{row[method_dic[method]['scan']]}": {
+    # Use row index to ensure each spectrum has a unique node name
+    # Even if filename and scan are the same, different spectra (with different m/z or RT) should be separate nodes
+    node_attrs = {}
+    specs = []
+    for idx, (_, row) in enumerate(cluster.iterrows()):
+        # Create unique node name using index to handle cases where multiple spectra have same filename_scan
+        node_name = f"{row[method_dic[method]['filename']]}_{row[method_dic[method]['scan']]}_{idx}"
+        node_attrs[node_name] = {
             "filename": row[method_dic[method]['filename']]
         }
-        for _, row in cluster.iterrows()
-    }
+        # Store node_name, filename, mass, rt_time for edge creation
+        specs.append((
+            node_name,  # node_name for graph (unique per spectrum)
+            row[method_dic[method]['filename']],  # filename for comparison (separate to avoid parsing)
+            row[method_dic[method]['mass']],
+            row[method_dic[method]['rt_time']]
+        ))
     G.add_nodes_from(node_attrs.items())
-
-    # Precompute mass and rt_time for efficient access
-    # Store filename and scan separately to avoid parsing issues with underscores in filenames
-    specs = cluster.apply(lambda row: (
-        f"{row[method_dic[method]['filename']]}_{row[method_dic[method]['scan']]}",  # node_name for graph
-        row[method_dic[method]['filename']],  # filename for comparison (separate to avoid parsing)
-        row[method_dic[method]['mass']],
-        row[method_dic[method]['rt_time']]
-    ), axis=1).tolist()
 
     # Create edges based on conditions
     # RT tolerance: configurable (default: 30 seconds)
     # Precursor m/z tolerance: configurable (default: 0.01 Da)
+    # 
+    # PERFORMANCE OPTIMIZATION: Group by filename first to avoid generating unnecessary combinations
+    # For clusters with multiple files, this dramatically reduces the number of combinations to check
+    # Example: 10k spectra in 10 files -> only check 10 × C(1k,2) instead of C(10k,2)
+    # 
     # Add a global/procedural variable to control tqdm/progress bar usage
     # By default, progress bar is off, unless set elsewhere by the user
     USE_PROGRESS_BAR = globals().get("USE_PROGRESS_BAR", False)
 
-    if USE_PROGRESS_BAR:
-        from tqdm import tqdm as _tqdm
-        comb_iter = _tqdm(list(combinations(specs, 2)), desc="Building cluster network")
+    if ignore_identifier:
+        # When ignoring identifier, all spectra are treated as from same file
+        # PERFORMANCE OPTIMIZATION: Use sliding window to avoid checking all combinations
+        # Sort by m/z first, then only check nearby spectra within the m/z window
+        # This dramatically reduces combinations for large clusters
+        # Example: 10k spectra -> from 50M to ~100k combinations (500x speedup)
+        
+        # Sort by m/z (index 2) for efficient sliding window
+        specs_sorted = sorted(specs, key=lambda x: x[2])  # x[2] is m/z
+        
+        # Use sliding window technique: for each spectra, only check nearby ones
+        def generate_edges_sliding_window():
+            n = len(specs_sorted)
+            for i in range(n):
+                spec1 = specs_sorted[i]
+                mz1 = spec1[2]
+                rt1 = spec1[3]
+                
+                # Find the range of spectra with m/z within window
+                # Since sorted, we can use early termination
+                j = i + 1
+                while j < n:
+                    spec2 = specs_sorted[j]
+                    mz2 = spec2[2]
+                    
+                    # Early termination: if m/z difference exceeds window, stop checking
+                    if mz2 - mz1 > precursor_mz_window:
+                        break
+                    
+                    # Check both m/z and RT windows
+                    if abs(mz1 - mz2) <= precursor_mz_window:
+                        rt2 = spec2[3]
+                        if abs(rt1 - rt2) <= rt_window:
+                            yield (spec1[0], spec2[0])
+                    
+                    j += 1
+        
+        # Generate edges using sliding window
+        edges = generate_edges_sliding_window()
+        
+        if USE_PROGRESS_BAR:
+            from tqdm import tqdm as _tqdm
+            # Estimate total combinations for progress bar
+            # Actual will be much less due to sliding window optimization
+            n = len(specs)
+            total_combinations = n * (n - 1) // 2
+            edges = _tqdm(edges, total=total_combinations, desc="Building cluster network")
     else:
-        comb_iter = combinations(specs, 2)
-
-    edges = [
-        (spec1[0], spec2[0]) for spec1, spec2 in comb_iter
-        if spec1[1] == spec2[1]
-           and abs(spec1[2] - spec2[2]) <= precursor_mz_window 
-           and abs(spec1[3] - spec2[3]) <= rt_window
-    ]
+        # OPTIMIZATION: Group by filename first, then only generate combinations within each group
+        # This avoids generating combinations between different files
+        from collections import defaultdict
+        
+        # Group specs by filename
+        specs_by_file = defaultdict(list)
+        for spec in specs:
+            filename = spec[1]  # spec[1] is the filename
+            specs_by_file[filename].append(spec)
+        
+        # Generate edges only within each file group
+        total_combinations = 0
+        edge_generators = []
+        
+        for filename, file_specs in specs_by_file.items():
+            if len(file_specs) < 2:
+                continue  # Skip files with less than 2 spectra
+            
+            # Generate combinations only within this file
+            file_comb_iter = combinations(file_specs, 2)
+            total_combinations += len(file_specs) * (len(file_specs) - 1) // 2
+            
+            # Create edge generator for this file
+            file_edges = (
+                (spec1[0], spec2[0]) for spec1, spec2 in file_comb_iter
+                if abs(spec1[2] - spec2[2]) <= precursor_mz_window 
+                   and abs(spec1[3] - spec2[3]) <= rt_window
+            )
+            edge_generators.append(file_edges)
+        
+        # Combine all edge generators
+        from itertools import chain
+        edges = chain(*edge_generators)
+        
+        if USE_PROGRESS_BAR:
+            from tqdm import tqdm as _tqdm
+            edges = _tqdm(edges, total=total_combinations, desc="Building cluster network")
+    
+    # add_edges_from can accept a generator, which is memory efficient
     G.add_edges_from(edges)
 
     return G
@@ -293,7 +451,7 @@ def calculate_max_component_per_file(G):
     return max_component_sizes
 
 
-def process_cluster(cluster_id, cluster_data, method='falcon', rt_window=30.0, precursor_mz_window=0.01):
+def process_cluster(cluster_id, cluster_data, method='falcon', rt_window=30.0, precursor_mz_window=0.01, ignore_identifier=False):
     """
     Process a single cluster to calculate purity (MS-RT method)
     
@@ -303,15 +461,30 @@ def process_cluster(cluster_id, cluster_data, method='falcon', rt_window=30.0, p
         method: Method name (e.g., 'falcon')
         rt_window: Retention time window in seconds
         precursor_mz_window: Precursor m/z window in Da
+        ignore_identifier: If True, treat all spectra in cluster as from same file (default: False)
     """
     if len(cluster_data) == 1:
         return (1.0, 1)  # Singleton cluster has purity 1
     
-    G = optimized_create_matching_network(cluster_data, method, rt_window, precursor_mz_window)
-    max_component_sizes = calculate_max_component_per_file(G)
+    G = optimized_create_matching_network(cluster_data, method, rt_window, precursor_mz_window, ignore_identifier)
     
     # Calculate the count of each filename in the cluster
-    file_counts = Counter(cluster_data[method_dic[method]['filename']])
+    # If ignore_identifier is True, treat all as from same file
+    if ignore_identifier:
+        # All spectra are treated as from the same file
+        file_counts = Counter({'same_file': len(cluster_data)})
+        # Find the largest connected component in the entire graph
+        # Use generator instead of converting to list to save memory for large graphs
+        components = nx.connected_components(G)
+        largest_component_size = 1
+        for comp in components:
+            comp_size = len(comp)
+            if comp_size > largest_component_size:
+                largest_component_size = comp_size
+        max_component_sizes = {'same_file': largest_component_size}
+    else:
+        file_counts = Counter(cluster_data[method_dic[method]['filename']])
+        max_component_sizes = calculate_max_component_per_file(G)
     
     # Calculate the fraction of the largest component for each file
     frequencies = []
@@ -331,7 +504,7 @@ def process_cluster(cluster_id, cluster_data, method='falcon', rt_window=30.0, p
     return (weighted_average, cluster_size)
 
 
-def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_mz_window=0.01):
+def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_mz_window=0.01, ignore_identifier=False):
     """
     Calculate purity for each cluster using network-based approach.
     Uses batching to avoid loading all clusters into memory at once.
@@ -341,6 +514,7 @@ def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_m
         batch_size: Number of clusters to process in each batch (default: 10000)
         rt_window: Retention time window in seconds (default: 30.0)
         precursor_mz_window: Precursor m/z window in Da (default: 0.01)
+        ignore_identifier: If True, treat all spectra in each cluster as from same file (default: False)
     
     Returns:
         purity_list: List of purity values for each cluster
@@ -357,6 +531,8 @@ def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_m
     total_clusters = clusters.ngroups
     print(f"Processing {total_clusters:,} clusters in batches of {batch_size:,}...")
     print(f"Using RT window: {rt_window} seconds, Precursor m/z window: {precursor_mz_window} Da")
+    if ignore_identifier:
+        print("Ignoring identifier: treating all spectra in each cluster as from same file")
     
     # Batch processing to avoid memory issues
     batch_items = []
@@ -374,7 +550,8 @@ def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_m
             # Process current batch with parallel processing
             with Pool() as pool:
                 process_func = partial(process_cluster, method=method, 
-                                     rt_window=rt_window, precursor_mz_window=precursor_mz_window)
+                                     rt_window=rt_window, precursor_mz_window=precursor_mz_window,
+                                     ignore_identifier=ignore_identifier)
                 batch_results = pool.starmap(process_func, batch_items)
             
             # Collect results
@@ -394,7 +571,8 @@ def falcon_purity(cluster_results, batch_size=10000, rt_window=30.0, precursor_m
     if batch_items:
         with Pool() as pool:
             process_func = partial(process_cluster, method=method,
-                                 rt_window=rt_window, precursor_mz_window=precursor_mz_window)
+                                 rt_window=rt_window, precursor_mz_window=precursor_mz_window,
+                                 ignore_identifier=ignore_identifier)
             batch_results = pool.starmap(process_func, batch_items)
         
         for purity, size in batch_results:
@@ -442,7 +620,7 @@ def calculate_weighted_average_purity(purity_array, size_array):
     return weighted_sum / total_weight
 
 
-def calculate_metrics(df, total_scans, rt_window=30.0, precursor_mz_window=0.01, batch_size=10000):
+def calculate_metrics(df, total_scans, rt_window=30.0, precursor_mz_window=0.01, batch_size=10000, ignore_identifier=False):
     """
     Calculate N10 and Purity metrics for a clustering result
     
@@ -452,6 +630,7 @@ def calculate_metrics(df, total_scans, rt_window=30.0, precursor_mz_window=0.01,
         rt_window: Retention time window in seconds (default: 30.0)
         precursor_mz_window: Precursor m/z window in Da (default: 0.01)
         batch_size: Batch size for processing (default: 10000)
+        ignore_identifier: If True, treat all spectra in each cluster as from same file (default: False)
     """
     print(f"\n{'='*80}")
     print(f"Calculating metrics for GPU clustering results")
@@ -469,7 +648,8 @@ def calculate_metrics(df, total_scans, rt_window=30.0, precursor_mz_window=0.01,
     print("Calculating purity (this may take a while)...")
     purity_list, size_list = falcon_purity(df, batch_size=batch_size, 
                                           rt_window=rt_window, 
-                                          precursor_mz_window=precursor_mz_window)
+                                          precursor_mz_window=precursor_mz_window,
+                                          ignore_identifier=ignore_identifier)
     
     # Convert to numpy arrays for easier calculation
     purity_array = np.array(purity_list)
@@ -527,6 +707,10 @@ Examples:
                        help='Batch size for multi-threaded processing (affects max memory usage, default: 10000)')
     parser.add_argument('--total_scans', type=int, default=None,
                        help='Total number of scans for N10 calculation (default: number of rows in input file)')
+    parser.add_argument('--ignore_identifier', action='store_true',
+                       help='Ignore identifier: treat all spectra in each cluster as from same file (default: False)')
+    parser.add_argument('--extract_identifier', action='store_true',
+                       help='Extract filename and scan number from identifier column (e.g., "file.mzML:123" -> filename="file.mzML", scan=123)')
     parser.add_argument('--output_dir', type=str, default='.',
                        help='Output directory for results (default: current directory)')
     
@@ -542,7 +726,7 @@ Examples:
     
     # Load results
     # Returns filtered dataframe (for purity) and total scans (for N10, including unclustered)
-    gpu_df, total_scans_in_file = load_gpu_results(tsv_file)
+    gpu_df, total_scans_in_file = load_gpu_results(tsv_file, extract_identifier=args.extract_identifier)
     
     # Convert retention_time in data if unit is minutes
     # If rt_unit is minutes, data retention_time values are in minutes, convert to seconds
@@ -584,7 +768,8 @@ Examples:
         total_scans,
         rt_window=rt_window_seconds,
         precursor_mz_window=args.precursor_mz_window,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        ignore_identifier=args.ignore_identifier
     )
     
     # Print summary

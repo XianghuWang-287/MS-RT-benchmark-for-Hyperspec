@@ -221,6 +221,52 @@ python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
 
 **Note:** The N10 metric is calculated based on the cumulative coverage of scans. Specifying a larger `--total_scans` value will result in a higher N10 value, as it requires more scans to reach the 10% coverage threshold.
 
+#### Ignore Identifier (Treat All Spectra as Same File)
+
+By default, the tool only creates edges between spectra from the same file (same `identifier`). Use `--ignore_identifier` to treat all spectra in each cluster as if they came from the same file, regardless of their original `identifier`.
+
+```bash
+python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
+                             --ignore_identifier
+```
+
+**Important Performance Warning:**
+- **When `--ignore_identifier` is used**, all spectra in each cluster are treated as from the same file
+- This means the tool needs to check **all possible pairs** of spectra within each cluster (C(n,2) combinations)
+- For large clusters (e.g., 10,000 spectra), this requires checking ~50 million combinations
+- **Performance Impact**: Using `--ignore_identifier` can be **significantly slower** (10-500x slower depending on cluster size) compared to the default behavior
+- The tool uses **sliding window optimization** (sorting by m/z and early termination) to mitigate this, but it still requires checking many more combinations than the default mode
+
+**When to use `--ignore_identifier`:**
+- When you want to evaluate clustering quality without considering file boundaries
+- When your data doesn't have meaningful file identifiers
+- When you want to see how well spectra cluster together regardless of their source file
+
+**Performance Comparison:**
+- **Default mode** (multiple files): For 10,000 spectra in 10 files, checks ~5 million combinations (10 × C(1000,2))
+- **Ignore identifier mode**: For 10,000 spectra, checks ~50 million combinations (C(10000,2))
+- The sliding window optimization reduces this to ~100k-500k actual checks, but still much slower than default mode
+
+#### Extract Filename and Scan from Identifier
+
+If your `identifier` column contains both filename and scan number in a combined format (e.g., `"file.mzML:123"`), use `--extract_identifier` to automatically extract them:
+
+```bash
+python src/msrt_benchmark.py --input data/orbitrap_clusterinfo_gpu.tsv \
+                             --extract_identifier
+```
+
+**How it works:**
+- Parses identifiers in format `"filename:scan_number"` (colon-separated)
+- Extracts filename (before colon) and scan number (after colon)
+- Replaces the original `scan` column with extracted values
+- If extraction fails, falls back to sequential numbering
+
+**Example:**
+- Input identifier: `"BE000017428-BL000540600_832570368_extract_pool_plate_A_2024-09-19.mzML:3632"`
+- Extracted filename: `"BE000017428-BL000540600_832570368_extract_pool_plate_A_2024-09-19.mzML"`
+- Extracted scan: `3632`
+
 #### Custom Output Directory
 
 Specify where to save the results:
